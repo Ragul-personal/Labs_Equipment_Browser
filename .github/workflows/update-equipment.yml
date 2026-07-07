@@ -2,7 +2,7 @@ name: Update Equipment Browser
 
 on:
   schedule:
-    - cron: "*/30 * * * *"   # Runs every 30 minutes
+    - cron: "7 0 * * *"   # Runs every day on 00:07
   workflow_dispatch:           # Allows manual trigger from GitHub UI
 
 jobs:
@@ -25,6 +25,11 @@ jobs:
       - name: Install dependencies
         run: |
           pip install pandas openpyxl
+          
+      - name: Cron heartbeat log
+        run: |
+          echo "Workflow executed at:"
+          date -u
 
       - name: Download latest Excel from OneDrive
         run: |
