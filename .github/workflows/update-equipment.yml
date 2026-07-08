@@ -31,7 +31,7 @@ jobs:
 
       - name: Download Excel from OneDrive folder
         run: |
-          curl -L "${{ secrets.ONEDRIVE_FOLDER_DOWNLOAD }}" \
+          curl -L "${{ secrets.ONEDRIVE_EXCEL_URL }}" \
           -o onedrive.zip
 
           unzip onedrive.zip -d excel_folder
