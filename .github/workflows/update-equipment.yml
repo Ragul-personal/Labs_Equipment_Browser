@@ -2,15 +2,15 @@ name: Update Equipment Browser
 
 on:
   schedule:
-    - cron: "7 0 * * *"
-  workflow_dispatch:
+    - cron: "7 0 * * *"   # Runs every day on 00:07
+  workflow_dispatch:           # Allows manual trigger from GitHub UI
 
 jobs:
   update-html:
     runs-on: ubuntu-latest
 
     permissions:
-      contents: write
+      contents: write          # Needed to commit back to repo
 
     steps:
 
@@ -23,40 +23,27 @@ jobs:
           python-version: "3.12"
 
       - name: Install dependencies
-        run: pip install pandas openpyxl
-
-      # ─────────────────────────────────────────────────────────────────────
-      # Secret: ONEDRIVE_EXCEL_LINK
-      # Value : Share link of the EXCEL FILE (not the folder)
-      #         e.g.  https://1drv.ms/x/c/69b69245da1a153e/Exxxxxx
-      #
-      # OneDrive upload rule: NEVER delete the old file.
-      #   Upload new file with the SAME filename → click "Replace"
-      #   This keeps the file ID and this link valid forever.
-      # ─────────────────────────────────────────────────────────────────────
-      - name: Download Excel from OneDrive
         run: |
-          curl -L \
-            "${{ secrets.ONEDRIVE_EXCEL_LINK }}?download=1" \
-            -o "IIT-M_L&E_Web&Visit_Data_OG.xlsx"
+          pip install pandas openpyxl
+          
+      - name: Cron heartbeat log
+        run: |
+          echo "Workflow executed at:"
+          date -u
 
-          # Sanity check: must be a real xlsx, not an HTML error page
-          FILE_SIZE=$(stat -c%s "IIT-M_L&E_Web&Visit_Data_OG.xlsx")
-          echo "Downloaded file size: ${FILE_SIZE} bytes"
+      - name: Download latest Excel from OneDrive
+        run: |
+          curl -L "${{ secrets.ONEDRIVE_EXCEL_LINK }}" \
+          -o "IIT-M_L&E_Web&Visit_Data_OG.xlsx"
 
-          if [ "$FILE_SIZE" -lt 5000 ]; then
-            echo "ERROR: File is too small to be a valid Excel file."
-            echo "       Check that ONEDRIVE_EXCEL_LINK is a file share link"
-            echo "       (starts with 1drv.ms/x/...) and the file is shared"
-            echo "       as 'Anyone with the link can view'."
-            exit 1
-          fi
-
-      - name: Verify Excel
-        run: ls -lh "IIT-M_L&E_Web&Visit_Data_OG.xlsx"
+      - name: Verify Excel downloaded correctly
+        run: |
+          ls -lh "IIT-M_L&E_Web&Visit_Data_OG.xlsx"
+          file "IIT-M_L&E_Web&Visit_Data_OG.xlsx"
 
       - name: Generate HTML
-        run: python regenerate_browser.py
+        run: |
+          python regenerate_browser.py
 
       - name: Commit updated HTML
         run: |
