@@ -25,11 +25,6 @@ jobs:
       - name: Install dependencies
         run: |
           pip install pandas openpyxl
-          
-      - name: Cron heartbeat log
-        run: |
-          echo "Workflow executed at:"
-          date -u
 
       - name: Download latest Excel from OneDrive
         run: |
