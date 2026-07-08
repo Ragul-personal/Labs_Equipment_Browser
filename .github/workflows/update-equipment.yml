@@ -37,7 +37,7 @@ jobs:
       - name: Download Excel from OneDrive
         run: |
           curl -L \
-            "${{ secrets.ONEDRIVE_EXCEL_URL }}?download=1" \
+            "${{ secrets.ONEDRIVE_EXCEL_LINK }}?download=1" \
             -o "IIT-M_L&E_Web&Visit_Data_OG.xlsx"
 
           # Sanity check: must be a real xlsx, not an HTML error page
@@ -46,7 +46,7 @@ jobs:
 
           if [ "$FILE_SIZE" -lt 5000 ]; then
             echo "ERROR: File is too small to be a valid Excel file."
-            echo "       Check that ONEDRIVE_EXCEL_URL is a file share link"
+            echo "       Check that ONEDRIVE_EXCEL_LINK is a file share link"
             echo "       (starts with 1drv.ms/x/...) and the file is shared"
             echo "       as 'Anyone with the link can view'."
             exit 1
