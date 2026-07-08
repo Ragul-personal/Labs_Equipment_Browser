@@ -28,16 +28,16 @@ jobs:
         run: |
           pip install pandas openpyxl
 
-
       - name: Download Excel from OneDrive folder
         run: |
-          curl -L "${{ secrets.ONEDRIVE_EXCEL_URL }}" \
-          -o onedrive.zip
-
+          wget --content-disposition \
+          "${{ secrets.ONEDRIVE_EXCEL_URL }}?download=1" \
+          -O onedrive.zip
+      
+          file onedrive.zip
+      
           unzip onedrive.zip -d excel_folder
-
-          find excel_folder -name "*.xlsx"
-
+      
           cp $(find excel_folder -name "*.xlsx" | head -1) \
           "IIT-M_L&E_Web&Visit_Data_OG.xlsx"
 
