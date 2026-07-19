@@ -1,0 +1,155 @@
+name: Update Equipment Browser
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Triggers
+# ─────────────────────────────────────────────────────────────────────────────
+on:
+  schedule:
+    - cron: "*/30 * * * *"   # Polls every 30 minutes
+  workflow_dispatch:           # Also runnable manually from GitHub Actions tab
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Job
+# ─────────────────────────────────────────────────────────────────────────────
+jobs:
+  update-html:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write   # Needed to push index.html back to the repo
+
+    steps:
+
+    # ── 1. Checkout ──────────────────────────────────────────────────────────
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    # ── 2. Python ────────────────────────────────────────────────────────────
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.12"
+
+    - name: Install dependencies
+      run: pip install openpyxl requests
+
+    # ── 3. Download Excel from OneDrive ──────────────────────────────────────
+    #
+    # This step downloads ONLY "IIT-M_L&E_Web&Visit_Data_OG.xlsx" from the
+    # OneDrive sharing link stored in the ONEDRIVE_EXCEL_URL secret.
+    # The sharing link must point to THIS SPECIFIC FILE (not the folder).
+    # When you overwrite the file in OneDrive with the same filename, the
+    # same sharing link always serves the latest version.
+    #
+    # Handles: 1drv.ms links, onedrive.live.com links, SharePoint links.
+    # Validates that the download is a real .xlsx file before proceeding.
+    #
+    - name: Download Excel from OneDrive
+      env:
+        ONEDRIVE_EXCEL_URL: ${{ secrets.ONEDRIVE_EXCEL_URL }}
+      run: |
+        python3 - << 'PYEOF'
+        import os, sys, requests
+
+        url      = os.environ["ONEDRIVE_EXCEL_URL"]
+        filename = "IIT-M_L&E_Web&Visit_Data_OG.xlsx"
+
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/125.0.0.0 Safari/537.36"
+            )
+        }
+
+        # Step A: follow all redirects to discover the final URL
+        # (1drv.ms short links redirect to the real OneDrive / SharePoint URL)
+        try:
+            probe = requests.get(url, headers=headers, allow_redirects=True, timeout=30)
+            final_url = probe.url
+            print(f"Resolved to: {final_url[:100]}...")
+        except Exception as e:
+            print(f"ERROR resolving URL: {e}")
+            sys.exit(1)
+
+        # Step B: ensure the URL triggers a file download, not a browser viewer
+        if "download=1" not in final_url:
+            sep = "&" if "?" in final_url else "?"
+            final_url = final_url + sep + "download=1"
+
+        # Step C: download the file
+        try:
+            r = requests.get(final_url, headers=headers, allow_redirects=True, timeout=60)
+        except Exception as e:
+            print(f"ERROR downloading file: {e}")
+            sys.exit(1)
+
+        if r.status_code != 200:
+            print(f"ERROR: HTTP {r.status_code}")
+            print(f"Response: {r.text[:300]}")
+            sys.exit(1)
+
+        # Step D: validate it is actually an Excel file
+        # All .xlsx files are ZIP archives and begin with PK (0x50 0x4B)
+        if len(r.content) < 4 or r.content[:2] != b"PK":
+            print(f"ERROR: Download is not a valid .xlsx file.")
+            print(f"  Size: {len(r.content)} bytes")
+            print(f"  Starts with: {r.content[:40]}")
+            print()
+            print("LIKELY CAUSE: The sharing link is restricted or expired.")
+            print("FIX: Recreate the OneDrive sharing link (see AUTOMATION_GUIDE.md)")
+            print("     and update the ONEDRIVE_EXCEL_URL secret in GitHub.")
+            sys.exit(1)
+
+        with open(filename, "wb") as f:
+            f.write(r.content)
+
+        print(f"OK — Downloaded {len(r.content):,} bytes → {filename}")
+        PYEOF
+
+    # ── 4. Detect whether the Excel file actually changed ────────────────────
+    #
+    # We store a SHA-256 hash of the last processed Excel in ".excel_hash"
+    # inside the repo. If the hash matches the downloaded file, nothing has
+    # changed and we skip the rest of the workflow — no unnecessary commits.
+    #
+    - name: Check whether Excel changed
+      id: changed
+      run: |
+        NEW_HASH=$(sha256sum "IIT-M_L&E_Web&Visit_Data_OG.xlsx" | awk '{print $1}')
+        echo "new_hash=$NEW_HASH" >> "$GITHUB_OUTPUT"
+
+        if [ -f ".excel_hash" ]; then
+          OLD_HASH=$(cat .excel_hash)
+          if [ "$NEW_HASH" = "$OLD_HASH" ]; then
+            echo "result=no_change" >> "$GITHUB_OUTPUT"
+            echo "Excel unchanged (hash matches) — nothing to do."
+          else
+            echo "result=changed" >> "$GITHUB_OUTPUT"
+            echo "Excel changed — will regenerate HTML."
+          fi
+        else
+          echo "result=changed" >> "$GITHUB_OUTPUT"
+          echo "No previous hash stored — first run, will generate HTML."
+        fi
+
+    # ── 5. Regenerate HTML (only when Excel changed) ─────────────────────────
+    - name: Generate index.html
+      if: steps.changed.outputs.result == 'changed'
+      run: python3 regenerate_browser.py
+
+    # ── 6. Commit and push ───────────────────────────────────────────────────
+    - name: Commit updated files
+      if: steps.changed.outputs.result == 'changed'
+      run: |
+        # Save the new hash so future runs can detect changes
+        echo "${{ steps.changed.outputs.new_hash }}" > .excel_hash
+
+        git config user.name  "github-actions[bot]"
+        git config user.email "github-actions[bot]@users.noreply.github.com"
+
+        git add index.html .excel_hash
+
+        TIMESTAMP=$(date -u '+%Y-%m-%d %H:%M UTC')
+        git commit -m "Auto-update: equipment browser [$TIMESTAMP]"
+        git push
