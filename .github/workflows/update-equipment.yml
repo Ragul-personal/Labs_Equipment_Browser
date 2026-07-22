@@ -1,19 +1,16 @@
 name: Update Equipment Browser
 
 on:
-  push:
-    paths:
-      - "IIT-M_L&E_Web&Visit_Data_OG.xlsx"   # Fires as soon as Power Automate commits the new file
   schedule:
-    - cron: "7 0 * * *"   # Safety-net regen daily in case a push trigger is ever missed
-  workflow_dispatch:       # Allows manual trigger from GitHub UI
+    - cron: "7 0 * * *"   # Runs every day on 00:07
+  workflow_dispatch:           # Allows manual trigger from GitHub UI
 
 jobs:
   update-html:
     runs-on: ubuntu-latest
 
     permissions:
-      contents: write      # Needed to commit back to the repo
+      contents: write          # Needed to commit back to repo
 
     steps:
 
@@ -28,53 +25,21 @@ jobs:
       - name: Install dependencies
         run: |
           pip install pandas openpyxl
-
+          
       - name: Cron heartbeat log
         run: |
           echo "Workflow executed at:"
           date -u
 
-      # ── WHY THE OLD CURL-BASED DOWNLOAD WAS REMOVED ──────────────────────────
-      # The OneDrive/SharePoint share link requires an authenticated sign-in
-      # (the tenant does not permit true anonymous "Anyone" links), so an
-      # unattended curl request in CI always lands on a Microsoft login page
-      # instead of the file bytes — no URL parameter can work around that.
-      #
-      # Fix: a Power Automate flow (running under a real signed-in account)
-      # watches the source file in OneDrive and commits it straight into this
-      # repo via the GitHub Contents API whenever it changes. That commit is
-      # what triggers this workflow (see the `push.paths` trigger above) — by
-      # the time this job runs, the xlsx is already sitting in the checkout,
-      # so there is nothing left to download or authenticate to here.
-      # ────────────────────────────────────────────────────────────────────────
-      - name: Verify Excel is present and well-formed
+      - name: Download latest Excel from OneDrive
         run: |
-          FILE="IIT-M_L&E_Web&Visit_Data_OG.xlsx"
+          curl -L "${{ secrets.ONEDRIVE_EXCEL_URL }}" \
+          -o "IIT-M_L&E_Web&Visit_Data_OG.xlsx"
 
-          if [ ! -f "$FILE" ]; then
-            echo "ERROR: $FILE not found in the checkout."
-            echo "Check that the Power Automate flow is committing it to the repo root."
-            exit 1
-          fi
-
-          ls -lh "$FILE"
-
-          # Read the first 4 bytes as hex; XLSX/ZIP files start with 504b0304 (PK..)
-          MAGIC=$(xxd -p -l 4 "$FILE")
-          echo "Magic bytes: $MAGIC"
-
-          if [ "$MAGIC" != "504b0304" ]; then
-            echo ""
-            echo "ERROR: $FILE is NOT a ZIP/XLSX archive (magic=$MAGIC)."
-            echo "First 400 bytes (for diagnosis):"
-            head -c 400 "$FILE" || true
-            echo ""
-            echo "SOLUTION: Check the Power Automate flow — it may be committing"
-            echo "an error page or partial content instead of the real file."
-            exit 1
-          fi
-
-          echo "Magic bytes OK — ZIP/XLSX structure confirmed."
+      - name: Verify Excel downloaded correctly
+        run: |
+          ls -lh "IIT-M_L&E_Web&Visit_Data_OG.xlsx"
+          file "IIT-M_L&E_Web&Visit_Data_OG.xlsx"
 
       - name: Generate HTML
         run: |
@@ -82,9 +47,8 @@ jobs:
 
       - name: Commit updated HTML
         run: |
-          git config user.name  "github-actions"
+          git config user.name "github-actions"
           git config user.email "actions@github.com"
           git add index.html
-          git diff --cached --quiet || \
-            git commit -m "Auto update: $(date -u '+%Y-%m-%d %H:%M UTC')"
+          git diff --cached --quiet || git commit -m "Auto update: $(date -u '+%Y-%m-%d %H:%M UTC')"
           git push
