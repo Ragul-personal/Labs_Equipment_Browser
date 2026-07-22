@@ -1,8 +1,11 @@
 name: Update Equipment Browser
 
 on:
+  push:
+    paths:
+      - "IIT-M_L&E_Web&Visit_Data_OG.xlsx"   # Fires as soon as Power Automate commits the new file
   schedule:
-    - cron: "7 0 * * *"   # Runs every day at 00:07 UTC
+    - cron: "7 0 * * *"   # Safety-net regen daily in case a push trigger is ever missed
   workflow_dispatch:       # Allows manual trigger from GitHub UI
 
 jobs:
@@ -31,53 +34,29 @@ jobs:
           echo "Workflow executed at:"
           date -u
 
-      # ── ROOT CAUSE FIX ──────────────────────────────────────────────────────
-      # OneDrive / SharePoint sharing URLs serve an HTML *preview page* by
-      # default.  The old command saved that HTML with a .xlsx extension, which
-      # made openpyxl raise  BadZipFile: File is not a zip file.
+      # ── WHY THE OLD CURL-BASED DOWNLOAD WAS REMOVED ──────────────────────────
+      # The OneDrive/SharePoint share link requires an authenticated sign-in
+      # (the tenant does not permit true anonymous "Anyone" links), so an
+      # unattended curl request in CI always lands on a Microsoft login page
+      # instead of the file bytes — no URL parameter can work around that.
       #
-      # Fix: append  &download=1  (or ?download=1 for URLs with no query
-      # string) to instruct the server to return the raw binary instead.
-      #
-      # Additional hardening:
-      #   --retry 3 / --retry-delay 5   automatic back-off on transient errors
-      #   --fail-with-body               non-zero exit + body on HTTP 4xx/5xx
-      #   --max-redirs 15                follow the full OneDrive redirect chain
-      #   -H "User-Agent: …"             some CDN nodes return HTML to unknown UAs
+      # Fix: a Power Automate flow (running under a real signed-in account)
+      # watches the source file in OneDrive and commits it straight into this
+      # repo via the GitHub Contents API whenever it changes. That commit is
+      # what triggers this workflow (see the `push.paths` trigger above) — by
+      # the time this job runs, the xlsx is already sitting in the checkout,
+      # so there is nothing left to download or authenticate to here.
       # ────────────────────────────────────────────────────────────────────────
-      - name: Download latest Excel from OneDrive
-        run: |
-          RAW_URL="${{ secrets.ONEDRIVE_EXCEL_URL }}"
-
-          # Append download=1 unless the secret URL already contains it.
-          if [[ "$RAW_URL" == *"download=1"* ]]; then
-            DOWNLOAD_URL="$RAW_URL"
-          elif [[ "$RAW_URL" == *"?"* ]]; then
-            DOWNLOAD_URL="${RAW_URL}&download=1"
-          else
-            DOWNLOAD_URL="${RAW_URL}?download=1"
-          fi
-
-          echo "Resolved download URL (secrets redacted by GitHub):"
-          echo "$DOWNLOAD_URL" | sed "s|$RAW_URL|<ONEDRIVE_EXCEL_URL>|"
-
-          curl -L \
-            --retry 3 \
-            --retry-delay 5 \
-            --max-redirs 15 \
-            --fail-with-body \
-            -H "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" \
-            -o "IIT-M_L&E_Web&Visit_Data_OG.xlsx" \
-            "$DOWNLOAD_URL"
-
-      # ── GATE: verify the file is a real XLSX before running Python ──────────
-      # Checks the ZIP magic bytes (PK\x03\x04) directly in the shell so the
-      # workflow fails here with an actionable message rather than inside
-      # openpyxl with an opaque BadZipFile traceback.
-      # ────────────────────────────────────────────────────────────────────────
-      - name: Verify Excel downloaded correctly
+      - name: Verify Excel is present and well-formed
         run: |
           FILE="IIT-M_L&E_Web&Visit_Data_OG.xlsx"
+
+          if [ ! -f "$FILE" ]; then
+            echo "ERROR: $FILE not found in the checkout."
+            echo "Check that the Power Automate flow is committing it to the repo root."
+            exit 1
+          fi
+
           ls -lh "$FILE"
 
           # Read the first 4 bytes as hex; XLSX/ZIP files start with 504b0304 (PK..)
@@ -86,13 +65,12 @@ jobs:
 
           if [ "$MAGIC" != "504b0304" ]; then
             echo ""
-            echo "ERROR: Downloaded file is NOT a ZIP/XLSX archive (magic=$MAGIC)."
-            echo "OneDrive likely returned an HTML page. First 400 bytes of the"
-            echo "download (for diagnosis):"
+            echo "ERROR: $FILE is NOT a ZIP/XLSX archive (magic=$MAGIC)."
+            echo "First 400 bytes (for diagnosis):"
             head -c 400 "$FILE" || true
             echo ""
-            echo "SOLUTION: Ensure ONEDRIVE_EXCEL_URL is a direct-download link."
-            echo "  Append '&download=1' (or '?download=1') to the URL in GitHub Secrets."
+            echo "SOLUTION: Check the Power Automate flow — it may be committing"
+            echo "an error page or partial content instead of the real file."
             exit 1
           fi
 
