@@ -114,6 +114,31 @@ def clean(v):
 
 
 def extract_data(filepath):
+    import zipfile, os
+    # Validate before handing to openpyxl so we get a clear error message
+    # instead of a cryptic BadZipFile traceback.
+    file_size = os.path.getsize(filepath)
+    if file_size < 1024:
+        # Read the content to help diagnose download issues
+        try:
+            with open(filepath, 'r', errors='replace') as fh:
+                content = fh.read(500)
+        except Exception:
+            content = '<unreadable>'
+        raise SystemExit(
+            f"\nERROR: '{filepath}' is only {file_size} bytes — not a valid Excel file.\n"
+            f"File content: {repr(content)}\n\n"
+            "LIKELY CAUSE: The OneDrive URL returned an HTML error/redirect page\n"
+            "instead of the raw .xlsx file. See the YAML workflow comment for\n"
+            "how to obtain the correct direct-download URL."
+        )
+    if not zipfile.is_zipfile(filepath):
+        raise SystemExit(
+            f"\nERROR: '{filepath}' is not a valid ZIP/xlsx file ({file_size:,} bytes).\n"
+            "Ensure the download URL points directly at the .xlsx binary, not an\n"
+            "HTML viewer page."
+        )
+
     wb = openpyxl.load_workbook(filepath, read_only=True)
     equipment = []
 
