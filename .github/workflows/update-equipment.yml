@@ -1,37 +1,21 @@
 name: Update Equipment Browser
 
-# ─────────────────────────────────────────────────────────────────────────────
-#  TRIGGERS
-#  • Runs automatically every night at 00:07 UTC (cron)
-#  • Can also be triggered manually from the GitHub Actions tab (workflow_dispatch)
-# ─────────────────────────────────────────────────────────────────────────────
 on:
   schedule:
-    - cron: "7 0 * * *"      # 00:07 UTC daily
-  workflow_dispatch:
+    - cron: "7 0 * * *"        # Runs every day at 00:07 UTC
+  workflow_dispatch:             # Allows manual trigger from GitHub UI
     inputs:
       debug_mode:
-        description: "Enable verbose debug output (prints curl headers)"
+        description: "Enable verbose curl output for debugging"
         required: false
         default: "false"
-        type: boolean
-
-# ─────────────────────────────────────────────────────────────────────────────
-#  REQUIRED GITHUB SECRET
-#  Go to → Settings → Secrets and variables → Actions → New repository secret
-#
-#  Name : ONEDRIVE_EXCEL_URL
-#  Value: your direct-download URL (see ONEDRIVE_SETUP_GUIDE.md for how to
-#          convert a share link into a direct-download URL)
-# ─────────────────────────────────────────────────────────────────────────────
 
 jobs:
   update-html:
     runs-on: ubuntu-latest
-    timeout-minutes: 15         # Kill the job if something hangs
 
     permissions:
-      contents: write           # Needed to commit index.html back to the repo
+      contents: write            # Needed to commit back to repo
 
     steps:
 
@@ -39,125 +23,77 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # ── 2. Python setup with pip cache ───────────────────────────────────────
-      - name: Setup Python 3.12
+      # ── 2. Python + pip cache ─────────────────────────────────────────────────
+      # cache: "pip" reads requirements.txt to build the cache key.
+      # Without requirements.txt in the repo this step crashes — that file is
+      # now committed alongside this workflow (see /requirements.txt).
+      - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-          cache: "pip"          # Caches pip packages — speeds up subsequent runs
+          cache: "pip"
+          cache-dependency-path: requirements.txt   # explicit path → no scan error
 
       # ── 3. Install dependencies ───────────────────────────────────────────────
-      - name: Install Python dependencies
-        run: pip install openpyxl pandas --quiet
+      - name: Install dependencies
+        run: pip install -r requirements.txt
 
-      # ── 4. Heartbeat log ─────────────────────────────────────────────────────
-      - name: Heartbeat log
+      # ── 4. Heartbeat log ──────────────────────────────────────────────────────
+      - name: Cron heartbeat log
         run: |
-          echo "────────────────────────────────────────"
-          echo "  Workflow  : ${{ github.workflow }}"
-          echo "  Triggered : ${{ github.event_name }}"
-          echo "  Runner OS : ${{ runner.os }}"
-          echo "  Repo      : ${{ github.repository }}"
-          echo "  Time (UTC): $(date -u '+%Y-%m-%d %H:%M:%S')"
-          echo "────────────────────────────────────────"
+          echo "Workflow executed at:"
+          date -u
 
-      # ── 5. Validate the secret exists ────────────────────────────────────────
-      #       Fail early with a clear message rather than a cryptic curl error.
-      - name: Validate ONEDRIVE_EXCEL_URL secret
+      # ── 5. Secret guard ───────────────────────────────────────────────────────
+      - name: Validate secret is set
         run: |
           if [ -z "${{ secrets.ONEDRIVE_EXCEL_URL }}" ]; then
-            echo ""
-            echo "  ✗ ERROR: The secret ONEDRIVE_EXCEL_URL is not set."
-            echo ""
-            echo "  How to fix:"
-            echo "  1. Go to your repo → Settings → Secrets and variables → Actions"
-            echo "  2. Click 'New repository secret'"
-            echo "  3. Name  : ONEDRIVE_EXCEL_URL"
-            echo "  4. Value : your OneDrive direct-download URL"
-            echo "  See ONEDRIVE_SETUP_GUIDE.md for how to construct the URL."
-            echo ""
+            echo "::error::Secret ONEDRIVE_EXCEL_URL is empty or not set."
+            echo "Go to: Settings → Secrets and variables → Actions → New repository secret"
             exit 1
           fi
-          echo "  ✓ Secret ONEDRIVE_EXCEL_URL is configured."
+          echo "Secret is present — proceeding."
 
-      # ── 6. Download the Excel file from OneDrive ──────────────────────────────
-      #       Flags:
-      #         -L           Follow HTTP 301/302 redirects (OneDrive always redirects)
-      #         --max-time   Abort if the whole download takes > 60 s
-      #         --retry 3    Retry up to 3 times on transient network errors
-      #         --retry-delay 5   Wait 5 s between retries
-      #         --fail       Exit with non-zero status on HTTP 4xx/5xx (catches
-      #                      OneDrive HTML error pages before they reach Python)
-      #         -o           Save to this exact filename (must match SOURCE_FILE
-      #                      in regenerate_browser.py)
-      - name: Download Excel from OneDrive
+      # ── 6. Download Excel from OneDrive ──────────────────────────────────────
+      # --fail        → exit non-zero on HTTP 4xx/5xx (catches expired share links)
+      # --show-error  → print the HTTP error even with --fail
+      # --location    → follow redirects (OneDrive always redirects)
+      # --max-time 60 → abort if the download stalls for >60 s
+      # --retry 3     → retry up to 3 times on transient network errors
+      - name: Download latest Excel from OneDrive
         run: |
-          echo "Downloading Excel file…"
-          curl -L \
-               --max-time 60 \
-               --retry 3 \
-               --retry-delay 5 \
-               --fail \
-               --show-error \
-               ${{ inputs.debug_mode == 'true' && '--verbose' || '--silent' }} \
-               "${{ secrets.ONEDRIVE_EXCEL_URL }}" \
-               -o "IIT-M_L&E_Web&Visit_Data_OG.xlsx"
-          echo "  ✓ Download finished."
+          CURL_FLAGS="--fail --show-error --location --max-time 60 --retry 3"
+          if [ "${{ github.event.inputs.debug_mode }}" = "true" ]; then
+            CURL_FLAGS="$CURL_FLAGS --verbose"
+          fi
+          curl $CURL_FLAGS \
+            "${{ secrets.ONEDRIVE_EXCEL_URL }}" \
+            -o "IIT-M_L&E_Web&Visit_Data_OG.xlsx"
 
-      # ── 7. Verify the download is a real XLSX (not an HTML error page) ────────
-      #       XLSX files are ZIP archives internally.
-      #       'file' reports them as "Zip" or "Microsoft OOXML".
-      #       If OneDrive returned an HTML page instead, this step will fail
-      #       with a clear message before Python even runs.
-      - name: Verify downloaded file is valid XLSX
+      # ── 7. Verify download ────────────────────────────────────────────────────
+      # If OneDrive returned an HTML error page, `file` reports "HTML document"
+      # instead of an Office Open XML type — we catch that and abort cleanly.
+      - name: Verify Excel downloaded correctly
         run: |
-          echo "File size and type:"
           ls -lh "IIT-M_L&E_Web&Visit_Data_OG.xlsx"
-          FTYPE=$(file "IIT-M_L&E_Web&Visit_Data_OG.xlsx")
-          echo "  $FTYPE"
-
-          # XLSX = ZIP internally; check for ZIP magic bytes / OOXML label
-          if echo "$FTYPE" | grep -qiE "(zip|ooxml|office|microsoft)"; then
-            echo "  ✓ File looks like a valid XLSX."
-          else
-            echo ""
-            echo "  ✗ ERROR: Downloaded file is NOT a valid Excel/XLSX file."
-            echo "  First 300 bytes of the file (to help diagnose):"
-            head -c 300 "IIT-M_L&E_Web&Visit_Data_OG.xlsx"
-            echo ""
-            echo "  Common causes:"
-            echo "    • OneDrive link expired   → regenerate the share link"
-            echo "    • Link requires sign-in   → change sharing to 'Anyone with link'"
-            echo "    • Missing &download=1     → see ONEDRIVE_SETUP_GUIDE.md"
-            echo "    • Wrong URL format        → the secret URL may have been"
-            echo "                                truncated when pasting"
+          FILE_TYPE=$(file "IIT-M_L&E_Web&Visit_Data_OG.xlsx")
+          echo "$FILE_TYPE"
+          if echo "$FILE_TYPE" | grep -qi "html"; then
+            echo "::error::Downloaded file is HTML, not Excel."
+            echo "Your OneDrive share link likely expired or requires login."
+            echo "Regenerate the link and update the ONEDRIVE_EXCEL_URL secret."
             exit 1
           fi
 
-      # ── 8. Run the HTML generator ─────────────────────────────────────────────
-      - name: Generate index.html
-        run: |
-          echo "Running regenerate_browser.py…"
-          python regenerate_browser.py
+      # ── 8. Generate HTML ──────────────────────────────────────────────────────
+      - name: Generate HTML
+        run: python regenerate_browser.py
 
-      # ── 9. Commit & push the updated HTML ─────────────────────────────────────
-      #       Uses the official GitHub Actions bot identity.
-      #       Skips the commit (with a friendly message) if nothing changed —
-      #       prevents an empty commit cluttering the history when the Excel
-      #       wasn't updated that day.
-      - name: Commit updated index.html
+      # ── 9. Commit & push ──────────────────────────────────────────────────────
+      - name: Commit updated HTML
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add index.html
-
-          if git diff --cached --quiet; then
-            echo "  ℹ No changes detected in index.html — nothing to commit."
-          else
-            CHANGES=$(git diff --cached --stat)
-            echo "  Changes to commit:"
-            echo "$CHANGES"
-            git commit -m "Auto update: $(date -u '+%Y-%m-%d %H:%M UTC')"
-            git push
-            echo "  ✓ Pushed updated index.html."
-          fi
+          git diff --cached --quiet || git commit -m "Auto update: $(date -u '+%Y-%m-%d %H:%M UTC')"
+          git push
