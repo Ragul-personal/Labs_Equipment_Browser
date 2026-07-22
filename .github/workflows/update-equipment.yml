@@ -25,21 +25,93 @@ jobs:
       - name: Install dependencies
         run: |
           pip install pandas openpyxl
-          
+
       - name: Cron heartbeat log
         run: |
           echo "Workflow executed at:"
           date -u
 
+      # ── FIX: OneDrive sharing links redirect to an HTML viewer page by default.
+      # ──      We need the DIRECT download URL stored in the secret, not the
+      # ──      sharing link.  How to get the right URL:
+      # ──
+      # ──   Option A (easiest) — OneDrive personal / business:
+      # ──     1. Open the file in OneDrive → click "⋯ More" → "Download"
+      # ──     2. Copy the URL from the browser's download bar BEFORE it saves —
+      # ──        it looks like: https://...sharepoint.com/...download.aspx?...
+      # ──        or https://api.onedrive.com/v1.0/shares/.../root/content
+      # ──     3. Store THAT URL in the ONEDRIVE_EXCEL_URL secret.
+      # ──
+      # ──   Option B — SharePoint:
+      # ──     URL format: https://TENANT.sharepoint.com/sites/SITE/_layouts/
+      # ──                 15/download.aspx?SourceUrl=/sites/SITE/path/to/file.xlsx
+      # ──
+      # ──   Option C — If you only have a 1drv.ms / OneDrive sharing link,
+      # ──     append &download=1 to the URL after following the first redirect:
+      # ──       REDIR=$(curl -sLI "$URL" -o /dev/null -w '%{url_effective}')
+      # ──       curl -L "${REDIR}&download=1" -o file.xlsx
+      # ──     (see the step below for an automated version of this)
+
       - name: Download latest Excel from OneDrive
         run: |
-          curl -L "${{ secrets.ONEDRIVE_EXCEL_URL }}" \
-          -o "IIT-M_L&E_Web&Visit_Data_OG.xlsx"
+          RAW_URL="${{ secrets.ONEDRIVE_EXCEL_URL }}"
+
+          # Follow any short-link redirect to get the real OneDrive URL, then
+          # append &download=1 so OneDrive returns the raw file instead of an
+          # HTML viewer page.  If the secret already holds a direct-download
+          # URL this step is harmless (the param is silently ignored).
+          EFFECTIVE_URL=$(curl -sLI "$RAW_URL" -o /dev/null -w '%{url_effective}')
+          if echo "$EFFECTIVE_URL" | grep -qiE '(onedrive|sharepoint|1drv)'; then
+            # Add download=1 only once
+            if echo "$EFFECTIVE_URL" | grep -q 'download='; then
+              DOWNLOAD_URL="$EFFECTIVE_URL"
+            else
+              DOWNLOAD_URL="${EFFECTIVE_URL}&download=1"
+            fi
+          else
+            # Unknown host — try the raw URL as-is
+            DOWNLOAD_URL="$RAW_URL"
+          fi
+
+          echo "Resolved download URL (host only): $(echo "$DOWNLOAD_URL" | cut -d'/' -f1-3)"
+          curl -L --fail-with-body --max-redirs 20 --max-time 120 \
+               --retry 3 --retry-delay 5 \
+               -H "User-Agent: curl/7.x" \
+               -o "IIT-M_L&E_Web&Visit_Data_OG.xlsx" \
+               "$DOWNLOAD_URL"
 
       - name: Verify Excel downloaded correctly
         run: |
-          ls -lh "IIT-M_L&E_Web&Visit_Data_OG.xlsx"
-          file "IIT-M_L&E_Web&Visit_Data_OG.xlsx"
+          FILE="IIT-M_L&E_Web&Visit_Data_OG.xlsx"
+          ls -lh "$FILE"
+          FILE_TYPE=$(file -b "$FILE")
+          FILE_SIZE=$(stat -c%s "$FILE")
+          echo "Type  : $FILE_TYPE"
+          echo "Size  : $FILE_SIZE bytes"
+
+          # xlsx files are ZIP archives — reject anything smaller than 1 KB
+          # or that isn't detected as a Zip/OOXML file.
+          if [ "$FILE_SIZE" -lt 1024 ]; then
+            echo ""
+            echo "ERROR: Downloaded file is only ${FILE_SIZE} bytes — expected a valid .xlsx."
+            echo "File contents:"
+            cat "$FILE"
+            echo ""
+            echo "LIKELY CAUSE: The ONEDRIVE_EXCEL_URL secret holds a sharing"
+            echo "  link that redirects to an HTML viewer page, not the raw file."
+            echo "  See the comment in the 'Download' step above for how to get"
+            echo "  the correct direct-download URL."
+            exit 1
+          fi
+
+          if ! echo "$FILE_TYPE" | grep -qiE '(zip|microsoft|OOXML|spreadsheet)'; then
+            echo ""
+            echo "ERROR: Downloaded file does not appear to be a valid Excel/ZIP file."
+            echo "Detected type: $FILE_TYPE"
+            exit 1
+          fi
+
+          echo "✓ File looks like a valid xlsx."
 
       - name: Generate HTML
         run: |
