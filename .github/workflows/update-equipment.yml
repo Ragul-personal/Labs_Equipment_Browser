@@ -1,236 +1,163 @@
 name: Update Equipment Browser
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Triggers
+#  TRIGGERS
+#  • Runs automatically every night at 00:07 UTC (cron)
+#  • Can also be triggered manually from the GitHub Actions tab (workflow_dispatch)
 # ─────────────────────────────────────────────────────────────────────────────
 on:
   schedule:
-    - cron: "*/30 * * * *"   # Polls every 30 minutes
-  workflow_dispatch:           # Also runnable manually from GitHub Actions tab
+    - cron: "7 0 * * *"      # 00:07 UTC daily
+  workflow_dispatch:
+    inputs:
+      debug_mode:
+        description: "Enable verbose debug output (prints curl headers)"
+        required: false
+        default: "false"
+        type: boolean
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Job
+#  REQUIRED GITHUB SECRET
+#  Go to → Settings → Secrets and variables → Actions → New repository secret
+#
+#  Name : ONEDRIVE_EXCEL_URL
+#  Value: your direct-download URL (see ONEDRIVE_SETUP_GUIDE.md for how to
+#          convert a share link into a direct-download URL)
 # ─────────────────────────────────────────────────────────────────────────────
+
 jobs:
   update-html:
     runs-on: ubuntu-latest
+    timeout-minutes: 15         # Kill the job if something hangs
 
     permissions:
-      contents: write   # Needed to push index.html back to the repo
+      contents: write           # Needed to commit index.html back to the repo
 
     steps:
 
-    # ── 1. Checkout ──────────────────────────────────────────────────────────
-    - name: Checkout repository
-      uses: actions/checkout@v4
+      # ── 1. Checkout ──────────────────────────────────────────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-    # ── 2. Python ────────────────────────────────────────────────────────────
-    - name: Set up Python
-      uses: actions/setup-python@v5
-      with:
-        python-version: "3.12"
+      # ── 2. Python setup with pip cache ───────────────────────────────────────
+      - name: Setup Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"          # Caches pip packages — speeds up subsequent runs
 
-    - name: Install dependencies
-      run: pip install openpyxl requests
+      # ── 3. Install dependencies ───────────────────────────────────────────────
+      - name: Install Python dependencies
+        run: pip install openpyxl pandas --quiet
 
-    # ── 3. Download Excel from OneDrive ──────────────────────────────────────
-    #
-    # Three methods tried in order — the first that returns a valid .xlsx wins.
-    #
-    # METHOD 1 — api.onedrive.com shares API
-    #   Encodes the original 1drv.ms sharing URL in base64 and calls the
-    #   OneDrive programmatic-access endpoint. Designed for script use.
-    #   No browser session or cookies needed.
-    #
-    # METHOD 2 — Manual redirect chain (resid + authkey)
-    #   Follows the redirect chain step-by-step and captures the 'resid' and
-    #   'authkey' parameters that appear in the /redir? step. Then builds:
-    #   https://onedrive.live.com/download?resid=...&authkey=...
-    #   This is the direct non-browser download URL for personal OneDrive files.
-    #
-    # METHOD 3 — download.aspx + session cookies
-    #   Last resort. Replaces Doc.aspx with download.aspx and reuses the
-    #   cookies accumulated during the Method 2 redirect traversal.
-    #
-    # If all three fail the error message tells you EXACTLY what to fix.
-    #
-    - name: Download Excel from OneDrive
-      env:
-        ONEDRIVE_EXCEL_URL: ${{ secrets.ONEDRIVE_EXCEL_URL }}
-      run: |
-        python3 - << 'PYEOF'
-        import os, sys, requests, base64
-        from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
+      # ── 4. Heartbeat log ─────────────────────────────────────────────────────
+      - name: Heartbeat log
+        run: |
+          echo "────────────────────────────────────────"
+          echo "  Workflow  : ${{ github.workflow }}"
+          echo "  Triggered : ${{ github.event_name }}"
+          echo "  Runner OS : ${{ runner.os }}"
+          echo "  Repo      : ${{ github.repository }}"
+          echo "  Time (UTC): $(date -u '+%Y-%m-%d %H:%M:%S')"
+          echo "────────────────────────────────────────"
 
-        url      = os.environ["ONEDRIVE_EXCEL_URL"]
-        filename = "IIT-M_L&E_Web&Visit_Data_OG.xlsx"
-
-        def is_valid_xlsx(content):
-            return len(content) > 4 and content[:2] == b"PK"
-
-        # ── METHOD 1: api.onedrive.com shares API ───────────────────────────
-        print("Method 1: api.onedrive.com shares API")
-        b64 = (base64.b64encode(url.encode()).decode()
-               .rstrip("=").replace("/", "_").replace("+", "-"))
-        api_url = f"https://api.onedrive.com/v1.0/shares/u!{b64}/root/content"
-        print(f"  {api_url[:95]}")
-        try:
-            r = requests.get(api_url, allow_redirects=True, timeout=60,
-                             headers={"User-Agent": "ISV|OneDriveSdk/1.0"})
-            if r.status_code == 200 and is_valid_xlsx(r.content):
-                with open(filename, "wb") as f:
-                    f.write(r.content)
-                print(f"  OK — {len(r.content):,} bytes")
-                sys.exit(0)
-            print(f"  HTTP {r.status_code} / not xlsx — trying Method 2")
-        except Exception as e:
-            print(f"  Error: {e} — trying Method 2")
-
-        # ── METHOD 2: Manual redirect chain → capture resid + authkey ───────
-        print("\nMethod 2: Redirect chain (resid + authkey)")
-        session = requests.Session()
-        session.headers["User-Agent"] = (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
-        )
-        resid = authkey = None
-        current = url
-
-        for step in range(12):
-            try:
-                resp = session.get(current, allow_redirects=False, timeout=30)
-            except Exception as e:
-                print(f"  Step {step} error: {e}")
-                break
-
-            print(f"  [{resp.status_code}] {current[:90]}")
-
-            # Scan current URL and Location header for resid / authkey
-            for check in [current, resp.headers.get("Location", "")]:
-                p = parse_qs(urlparse(check).query)
-                if "resid"   in p: resid   = p["resid"][0]
-                if "authkey" in p: authkey = p["authkey"][0]
-
-            if resid and authkey:
-                print(f"  Found resid and authkey")
-                break
-
-            if not resp.is_redirect:
-                break
-
-            loc = resp.headers.get("Location", "")
-            if not loc:
-                break
-            if loc.startswith("/"):
-                base = urlparse(current)
-                loc  = f"{base.scheme}://{base.netloc}{loc}"
-            current = loc
-
-        if resid and authkey:
-            dl = (f"https://onedrive.live.com/download"
-                  f"?resid={requests.utils.quote(resid, safe='!~')}"
-                  f"&authkey={requests.utils.quote(authkey, safe='!~_-')}")
-            print(f"  Downloading: {dl[:95]}")
-            try:
-                r = session.get(dl, allow_redirects=True, timeout=60)
-                if r.status_code == 200 and is_valid_xlsx(r.content):
-                    with open(filename, "wb") as f:
-                        f.write(r.content)
-                    print(f"  OK — {len(r.content):,} bytes")
-                    sys.exit(0)
-                print(f"  HTTP {r.status_code} / not xlsx — trying Method 3")
-            except Exception as e:
-                print(f"  Error: {e} — trying Method 3")
-        else:
-            print("  resid/authkey not in redirect chain — trying Method 3")
-
-        # ── METHOD 3: download.aspx + session cookies ────────────────────────
-        print("\nMethod 3: download.aspx with session cookies")
-        try:
-            dl = (current
-                  .replace("Doc.aspx",  "download.aspx")
-                  .replace("doc.aspx",  "download.aspx"))
-            p    = urlparse(dl)
-            keep = {k: v for k, v in parse_qs(p.query).items()
-                    if k == "sourcedoc"}
-            dl   = urlunparse(p._replace(query=urlencode(keep, doseq=True)))
-            print(f"  {dl[:95]}")
-            r = session.get(dl, allow_redirects=True, timeout=60)
-            if r.status_code == 200 and is_valid_xlsx(r.content):
-                with open(filename, "wb") as f:
-                    f.write(r.content)
-                print(f"  OK — {len(r.content):,} bytes")
-                sys.exit(0)
-            print(f"  HTTP {r.status_code} / not xlsx")
-        except Exception as e:
-            print(f"  Error: {e}")
-
-        # ── ALL METHODS FAILED ───────────────────────────────────────────────
-        print()
-        print("=" * 65)
-        print("ERROR: All three download methods failed.")
-        print()
-        print("The most common cause:")
-        print("  The ONEDRIVE_EXCEL_URL secret is the wrong type of URL.")
-        print()
-        print("  WRONG — browser address bar URL (does not work in scripts):")
-        print("    https://onedrive.live.com/personal/.../Doc.aspx?...")
-        print()
-        print("  RIGHT — sharing link from the Share dialog (1drv.ms format):")
-        print("    https://1drv.ms/x/s!AbCdEfGhIjKl")
-        print()
-        print("HOW TO GET THE CORRECT URL:")
-        print("  1. In OneDrive, right-click the Excel FILE → Share")
-        print("  2. Settings gear → 'Anyone with the link' → Can view → Apply")
-        print("  3. Click 'Copy link'  ← this gives the 1drv.ms URL")
-        print("  4. GitHub → Settings → Secrets → ONEDRIVE_EXCEL_URL → update")
-        print("  5. Re-run this workflow")
-        sys.exit(1)
-        PYEOF
-
-    # ── 4. Detect whether the Excel file actually changed ────────────────────
-    #
-    # We store a SHA-256 hash of the last processed Excel in ".excel_hash"
-    # inside the repo. If the hash matches the downloaded file, nothing has
-    # changed and we skip the rest of the workflow — no unnecessary commits.
-    #
-    - name: Check whether Excel changed
-      id: changed
-      run: |
-        NEW_HASH=$(sha256sum "IIT-M_L&E_Web&Visit_Data_OG.xlsx" | awk '{print $1}')
-        echo "new_hash=$NEW_HASH" >> "$GITHUB_OUTPUT"
-
-        if [ -f ".excel_hash" ]; then
-          OLD_HASH=$(cat .excel_hash)
-          if [ "$NEW_HASH" = "$OLD_HASH" ]; then
-            echo "result=no_change" >> "$GITHUB_OUTPUT"
-            echo "Excel unchanged (hash matches) — nothing to do."
-          else
-            echo "result=changed" >> "$GITHUB_OUTPUT"
-            echo "Excel changed — will regenerate HTML."
+      # ── 5. Validate the secret exists ────────────────────────────────────────
+      #       Fail early with a clear message rather than a cryptic curl error.
+      - name: Validate ONEDRIVE_EXCEL_URL secret
+        run: |
+          if [ -z "${{ secrets.ONEDRIVE_EXCEL_URL }}" ]; then
+            echo ""
+            echo "  ✗ ERROR: The secret ONEDRIVE_EXCEL_URL is not set."
+            echo ""
+            echo "  How to fix:"
+            echo "  1. Go to your repo → Settings → Secrets and variables → Actions"
+            echo "  2. Click 'New repository secret'"
+            echo "  3. Name  : ONEDRIVE_EXCEL_URL"
+            echo "  4. Value : your OneDrive direct-download URL"
+            echo "  See ONEDRIVE_SETUP_GUIDE.md for how to construct the URL."
+            echo ""
+            exit 1
           fi
-        else
-          echo "result=changed" >> "$GITHUB_OUTPUT"
-          echo "No previous hash stored — first run, will generate HTML."
-        fi
+          echo "  ✓ Secret ONEDRIVE_EXCEL_URL is configured."
 
-    # ── 5. Regenerate HTML (only when Excel changed) ─────────────────────────
-    - name: Generate index.html
-      if: steps.changed.outputs.result == 'changed'
-      run: python3 regenerate_browser.py
+      # ── 6. Download the Excel file from OneDrive ──────────────────────────────
+      #       Flags:
+      #         -L           Follow HTTP 301/302 redirects (OneDrive always redirects)
+      #         --max-time   Abort if the whole download takes > 60 s
+      #         --retry 3    Retry up to 3 times on transient network errors
+      #         --retry-delay 5   Wait 5 s between retries
+      #         --fail       Exit with non-zero status on HTTP 4xx/5xx (catches
+      #                      OneDrive HTML error pages before they reach Python)
+      #         -o           Save to this exact filename (must match SOURCE_FILE
+      #                      in regenerate_browser.py)
+      - name: Download Excel from OneDrive
+        run: |
+          echo "Downloading Excel file…"
+          curl -L \
+               --max-time 60 \
+               --retry 3 \
+               --retry-delay 5 \
+               --fail \
+               --show-error \
+               ${{ inputs.debug_mode == 'true' && '--verbose' || '--silent' }} \
+               "${{ secrets.ONEDRIVE_EXCEL_URL }}" \
+               -o "IIT-M_L&E_Web&Visit_Data_OG.xlsx"
+          echo "  ✓ Download finished."
 
-    # ── 6. Commit and push ───────────────────────────────────────────────────
-    - name: Commit updated files
-      if: steps.changed.outputs.result == 'changed'
-      run: |
-        # Save the new hash so future runs can detect changes
-        echo "${{ steps.changed.outputs.new_hash }}" > .excel_hash
+      # ── 7. Verify the download is a real XLSX (not an HTML error page) ────────
+      #       XLSX files are ZIP archives internally.
+      #       'file' reports them as "Zip" or "Microsoft OOXML".
+      #       If OneDrive returned an HTML page instead, this step will fail
+      #       with a clear message before Python even runs.
+      - name: Verify downloaded file is valid XLSX
+        run: |
+          echo "File size and type:"
+          ls -lh "IIT-M_L&E_Web&Visit_Data_OG.xlsx"
+          FTYPE=$(file "IIT-M_L&E_Web&Visit_Data_OG.xlsx")
+          echo "  $FTYPE"
 
-        git config user.name  "github-actions[bot]"
-        git config user.email "github-actions[bot]@users.noreply.github.com"
+          # XLSX = ZIP internally; check for ZIP magic bytes / OOXML label
+          if echo "$FTYPE" | grep -qiE "(zip|ooxml|office|microsoft)"; then
+            echo "  ✓ File looks like a valid XLSX."
+          else
+            echo ""
+            echo "  ✗ ERROR: Downloaded file is NOT a valid Excel/XLSX file."
+            echo "  First 300 bytes of the file (to help diagnose):"
+            head -c 300 "IIT-M_L&E_Web&Visit_Data_OG.xlsx"
+            echo ""
+            echo "  Common causes:"
+            echo "    • OneDrive link expired   → regenerate the share link"
+            echo "    • Link requires sign-in   → change sharing to 'Anyone with link'"
+            echo "    • Missing &download=1     → see ONEDRIVE_SETUP_GUIDE.md"
+            echo "    • Wrong URL format        → the secret URL may have been"
+            echo "                                truncated when pasting"
+            exit 1
+          fi
 
-        git add index.html .excel_hash
+      # ── 8. Run the HTML generator ─────────────────────────────────────────────
+      - name: Generate index.html
+        run: |
+          echo "Running regenerate_browser.py…"
+          python regenerate_browser.py
 
-        TIMESTAMP=$(date -u '+%Y-%m-%d %H:%M UTC')
-        git commit -m "Auto-update: equipment browser [$TIMESTAMP]"
-        git push
+      # ── 9. Commit & push the updated HTML ─────────────────────────────────────
+      #       Uses the official GitHub Actions bot identity.
+      #       Skips the commit (with a friendly message) if nothing changed —
+      #       prevents an empty commit cluttering the history when the Excel
+      #       wasn't updated that day.
+      - name: Commit updated index.html
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add index.html
+
+          if git diff --cached --quiet; then
+            echo "  ℹ No changes detected in index.html — nothing to commit."
+          else
+            CHANGES=$(git diff --cached --stat)
+            echo "  Changes to commit:"
+            echo "$CHANGES"
+            git commit -m "Auto update: $(date -u '+%Y-%m-%d %H:%M UTC')"
+            git push
+            echo "  ✓ Pushed updated index.html."
+          fi
